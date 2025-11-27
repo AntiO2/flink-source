@@ -22,6 +22,8 @@ import org.apache.flink.util.CloseableIterator;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.catalog.Catalog;
+import org.apache.iceberg.catalog.Namespace;
+import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.flink.CatalogLoader;
 import org.apache.iceberg.types.Types;
@@ -116,6 +118,11 @@ public class PixelsE2ETest {
         // Enable fast checkpointing for tests
         props.setProperty("checkpoint.interval.ms", "500");
         
+        // Use a custom database for isolation and to avoid default location issues
+        String dbName = "pixels_e2e";
+        
+        System.out.println("DEBUG: Loaded Properties: " + props);
+
         String tableName;
         String warehouse;
 
@@ -124,10 +131,12 @@ public class PixelsE2ETest {
             if (warehouse == null) {
                 throw new RuntimeException("paimon.catalog.warehouse must be configured in pixels-client.properties");
             }
-            tableName = props.getProperty("paimon.table.name");
-            if (tableName == null) {
+            String rawTableName = props.getProperty("paimon.table.name");
+            if (rawTableName == null) {
                 throw new RuntimeException("paimon.table.name must be configured in pixels-client.properties");
             }
+            tableName = dbName + "." + rawTableName;
+            props.setProperty("paimon.table.name", tableName); // Update props for App
 
             // Create Paimon Table
             Options options = new Options();
@@ -141,12 +150,12 @@ public class PixelsE2ETest {
 
             org.apache.paimon.catalog.Catalog catalog = CatalogFactory.createCatalog(CatalogContext.create(options));
             try {
-                catalog.createDatabase("default", true);
+                catalog.createDatabase(dbName, true);
             } catch (org.apache.paimon.catalog.Catalog.DatabaseAlreadyExistException e) {
                 // Ignore
             }
             
-            Identifier id = Identifier.create("default", tableName);
+            Identifier id = Identifier.create(dbName, rawTableName);
             if (catalog.tableExists(id)) {
                 catalog.dropTable(id, true);
             }
@@ -161,10 +170,12 @@ public class PixelsE2ETest {
             if (warehouse == null) {
                 throw new RuntimeException("iceberg.catalog.warehouse must be configured in pixels-client.properties");
             }
-            tableName = props.getProperty("iceberg.table.name");
-             if (tableName == null) {
+            String rawTableName = props.getProperty("iceberg.table.name");
+             if (rawTableName == null) {
                 throw new RuntimeException("iceberg.table.name must be configured in pixels-client.properties");
             }
+            tableName = dbName + "." + rawTableName;
+            props.setProperty("iceberg.table.name", tableName); // Update props for App
 
             // Create Iceberg Table
             Configuration hadoopConf = new Configuration();
@@ -208,7 +219,23 @@ public class PixelsE2ETest {
             }
 
             Catalog catalog = loader.loadCatalog();
-            TableIdentifier name = TableIdentifier.of("default", tableName);
+            System.out.println("DEBUG: Catalog Class: " + catalog.getClass().getName());
+            
+            // Ensure namespace exists
+            Namespace namespace = Namespace.of(dbName);
+            if (catalog instanceof SupportsNamespaces) {
+                SupportsNamespaces supportsNamespaces = (SupportsNamespaces) catalog;
+                if (!supportsNamespaces.namespaceExists(namespace)) {
+                    try {
+                        supportsNamespaces.createNamespace(namespace);
+                        System.out.println("DEBUG: Created namespace: " + dbName);
+                    } catch (Exception e) {
+                        System.out.println("DEBUG: Failed to create namespace (might exist): " + e.getMessage());
+                    }
+                }
+            }
+
+            TableIdentifier name = TableIdentifier.of(dbName, rawTableName);
             
             if (catalog.tableExists(name)) {
                 catalog.dropTable(name);
@@ -219,6 +246,11 @@ public class PixelsE2ETest {
                     Types.NestedField.required(2, "data", Types.StringType.get())
             );
             catalog.createTable(name, schema, PartitionSpec.unpartitioned());
+            
+            // Debug: Print Table Location
+            org.apache.iceberg.Table table = catalog.loadTable(name);
+            System.out.println("DEBUG: Created Table Location: " + table.location());
+            System.out.println("DEBUG: Table Properties: " + table.properties());
         }
 
         System.out.println("Submitting Writer Job (" + sinkType + ")...");
@@ -233,7 +265,7 @@ public class PixelsE2ETest {
 
         // 3. Poll for Data Verification
         try {
-            verifyDataWithTimeout(sinkType, props, tableName, 60000); // Increased timeout for S3
+            verifyDataWithTimeout(sinkType, props, tableName, 60000, dbName); // Increased timeout for S3
         } finally {
             // 4. Cancel Writer Job
             try {
@@ -245,7 +277,7 @@ public class PixelsE2ETest {
         }
     }
 
-    private void verifyDataWithTimeout(String sinkType, Properties props, String tableName, long timeoutMs) throws Exception {
+    private void verifyDataWithTimeout(String sinkType, Properties props, String tableName, long timeoutMs, String dbName) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMs;
         List<String> rows = new ArrayList<>();
         
@@ -256,11 +288,6 @@ public class PixelsE2ETest {
         // Register Catalog Once
         if ("paimon".equals(sinkType)) {
             String warehouse = props.getProperty("paimon.catalog.warehouse");
-            // Parse database from table name if present
-            String dbName = "default";
-            if (tableName.contains(".")) {
-                dbName = tableName.split("\\.")[0];
-            }
 
             StringBuilder ddl = new StringBuilder();
             ddl.append("CREATE CATALOG paimon_verify WITH (");
@@ -275,19 +302,11 @@ public class PixelsE2ETest {
             
             tEnv.executeSql(ddl.toString());
             tEnv.executeSql("USE CATALOG paimon_verify");
-            if (!"default".equals(dbName)) {
-                 tEnv.executeSql("USE " + dbName);
-            }
+            tEnv.executeSql("USE " + dbName);
         } else {
             String warehouse = props.getProperty("iceberg.catalog.warehouse");
             String catalogType = props.getProperty("iceberg.catalog.type", "hadoop");
             
-            // Parse database from table name if present
-            String dbName = "default";
-            if (tableName.contains(".")) {
-                dbName = tableName.split("\\.")[0];
-            }
-
             StringBuilder ddl = new StringBuilder();
             ddl.append("CREATE CATALOG iceberg_verify WITH (");
             ddl.append("'type'='iceberg', ");
@@ -329,6 +348,7 @@ public class PixelsE2ETest {
 
             tEnv.executeSql(ddl.toString());
             tEnv.executeSql("USE CATALOG iceberg_verify");
+            tEnv.executeSql("USE " + dbName);
         }
 
         while (System.currentTimeMillis() < deadline) {

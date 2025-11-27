@@ -242,6 +242,16 @@
             <artifactId>s3</artifactId>
             <version>2.20.26</version>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb</artifactId>
+            <version>2.20.26</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>kms</artifactId>
+            <version>2.20.26</version>
+        </dependency>
         <!-- AWS SDK HTTP Client - Required for AWS SDK v2 -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -295,6 +305,7 @@
                         --add-opens java.base/java.lang=ALL-UNNAMED
                         --add-opens java.base/java.util=ALL-UNNAMED
                         --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+                        --add-opens java.base/java.util.concurrent.atomic=ALL-UNNAMED
                         --add-opens java.base/java.text=ALL-UNNAMED
                         --add-opens java.base/java.time=ALL-UNNAMED
                         --add-opens java.base/java.math=ALL-UNNAMED
